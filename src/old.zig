@@ -50,11 +50,13 @@ fn producer(io: Io, server: *net.Server, q: *Io.Queue(net.Stream)) error{Cancele
     // It contains a Socket object (a FILE DESCRIPTOR)
     // and a read-write interface to interact with the socket
     while (true) {
-        const conn: net.Stream = server.accept(io) catch break;
+        const conn: net.Stream = server.accept(io) catch {
+            continue;
+        };
         // If it fails to put into queue close connection and break
         q.putOne(io, conn) catch {
             conn.close(io);
-            break;
+            continue;
         };
     }
 }
@@ -66,12 +68,12 @@ fn producer(io: Io, server: *net.Server, q: *Io.Queue(net.Stream)) error{Cancele
 // _ = try io.concurrent(handler, .{ io, &queue });
 fn consumer(io: Io, q: *Io.Queue(net.Stream)) error{Canceled}!void {
     while (true) {
-        const conn = q.getOne(io) catch break;
+        const conn = q.getOne(io) catch continue;
         // defer conn.close(io);
 
         handler(io, conn) catch {
-            // conn.close(io);
-            break;
+            conn.close(io);
+            continue;
         };
     }
 }
