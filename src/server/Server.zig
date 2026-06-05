@@ -31,6 +31,7 @@ pub fn init(io: Io, alloc: std.mem.Allocator, addr: net.IpAddress, opt: ServerOp
 const ServerOptions = struct {
     is_local: Local = .loopback,
     queue_size: usize = 10,
+    n_workers: usize = 10,
 
     const Local = enum {
         loopback,
@@ -67,9 +68,10 @@ pub fn runServer(self: *Server) !void {
     var queue = self.queue.?;
 
     _ = try g.concurrent(io, producer, .{ io, &tcp_socket, &queue });
-    // _ = try g.concurrent(io, consumer, .{ io, &queue });
-    // _ = try g.concurrent(io, consumer, .{ io, &queue });
-    // _ = try g.concurrent(io, consumer, .{ io, &queue });
+
+    for (0..self.options.n_workers) |_| {
+        _ = try g.concurrent(io, consumer, .{ io, &queue });
+    }
 
     try g.await(self.io);
 }
@@ -97,6 +99,62 @@ fn producer(io: Io, tcp_server: *net.Server, q: *Io.Queue(net.Stream)) error{Can
             conn.close(io);
             break;
         };
+    }
+}
+
+// each worker assign buffer to be used by the internal handler in its stack
+fn consumer(io: Io, q: *Io.Queue(net.Stream)) error{Canceled}!void {
+
+    // Reader and Writer buffer to pass to the http handler
+    // Maybe make their size an option
+    var rbuf: [4 * 1024]u8 = undefined;
+    var wbuf: [4 * 1024]u8 = undefined;
+    while (true) {
+        // DO something with queue cancelation errors
+        const conn = q.getOne(io) catch continue;
+        // defer conn.close(io);
+
+        handler(io, conn, &rbuf, &wbuf) catch {
+            conn.close(io);
+            continue;
+        };
+    }
+}
+
+fn handler(io: Io, conn: net.Stream, rbuf: []u8, wbuf: []u8) !void {
+    // close the connection after handling. The whole server will block when all threads are busy.
+    // find a way to make it more "fiber like" and yield a connection
+    defer conn.close(io);
+    //
+    // We pass the addresses of the buffers to coerce them into slices
+    var reader = conn.reader(io, rbuf);
+    var writer = conn.writer(io, wbuf);
+
+    // Wrapper around the connection (just a reader and a writer)
+    // It upgrade the reader to an HTTP READER interface.
+    // That is just a reader with functionalities to parse http
+    var server = http.Server.init(&reader.interface, &writer.interface);
+
+    // Server loop
+    while (server.reader.state == .ready) {
+        // We handle the request for a specific conecction close connection if there are errors
+        // A request has a pointer to the http server (a CONNECTION WITH HTTP reader methods)
+        // The headers and other properties are parsed.
+        // Maybe we can pass process the request elsewhere?
+        // So that the connection doesn't get troubled?
+        var request = server.receiveHead() catch |err| switch (err) {
+            error.HttpConnectionClosing => return,
+            error.HttpHeadersOversize => {
+                log.warn("Headers too big", .{});
+                return;
+            },
+            else => {
+                log.warn("Error with the request: {any}\n", .{err});
+                return;
+            },
+        };
+        log.info("Responding to {s}\n", .{request.head_buffer});
+        try request.respond("Hello world", .{ .keep_alive = false, .status = .ok });
     }
 }
 
