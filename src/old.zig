@@ -68,6 +68,7 @@ fn producer(io: Io, server: *net.Server, q: *Io.Queue(net.Stream)) error{Cancele
 // _ = try io.concurrent(handler, .{ io, &queue });
 fn consumer(io: Io, q: *Io.Queue(net.Stream)) error{Canceled}!void {
     while (true) {
+        // DO something with queue cancelation errors
         const conn = q.getOne(io) catch continue;
         // defer conn.close(io);
 
@@ -83,6 +84,8 @@ fn handler(io: Io, conn: net.Stream) !void {
     defer conn.close(io);
 
     // Here we access the reader and writer streaming
+    // Maybe allocate some other kind of memory
+    // In the heap??
     var rbuf: [4 * 1024]u8 = undefined;
     var wbuf: [1024]u8 = undefined;
 
