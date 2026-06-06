@@ -72,7 +72,6 @@ pub fn runServer(self: *Server) !void {
     for (0..self.options.n_workers) |_| {
         _ = try g.concurrent(io, consumer, .{ io, &queue });
     }
-
     try g.await(self.io);
 }
 
@@ -92,6 +91,8 @@ fn producer(io: Io, tcp_server: *net.Server, q: *Io.Queue(net.Stream)) error{Can
             },
             else => continue,
         };
+
+        // TODO: Connection timeout logic
 
         // if we cannot put the connection to the queue close the connection and stop the loop
         // manage the canceling errors
@@ -126,6 +127,9 @@ fn handler(io: Io, conn: net.Stream, rbuf: []u8, wbuf: []u8) !void {
     // find a way to make it more "fiber like" and yield a connection
     defer conn.close(io);
     //
+    // Make an allocator, maybe make it passable around
+    const gpa: std.mem.Allocator = std.heap.page_allocator;
+
     // We pass the addresses of the buffers to coerce them into slices
     var reader = conn.reader(io, rbuf);
     var writer = conn.writer(io, wbuf);
@@ -153,19 +157,64 @@ fn handler(io: Io, conn: net.Stream, rbuf: []u8, wbuf: []u8) !void {
                 return;
             },
         };
-        log.info("Responding to {s}\n", .{request.head_buffer});
-        try request.respond("Hello world", .{ .keep_alive = false, .status = .ok });
+        log.debug("Responding to {s}\n", .{request.head_buffer});
+
+        var ctx: Context = .{ .allocator = gpa, .io = io, .request = &request };
+        // serve a static file
+        try static_server(&ctx);
+
+        // const html_headers = [_]http.Header{
+        //     // .{ .name = "Cache-Control", .value = "public, max-age=3600" },
+        //     .{ .name = "Content-Type", .value = "text/html" },
+        // };
+
+        // Make a static file server, first single file, later by sub dir
+        // Use the router to match queries and patterns
+
+        //TODO: something along the line of
+        // router.process(request);
+
+        // try request.respond(HTML_STATIC, .{ .keep_alive = true, .status = .ok, .extra_headers = &html_headers });
+        // try request.respond(CSS, .{ .keep_alive = true, .status = .ok, .extra_headers = &css_headers });
     }
 }
 
-// routes: []Route,
-// address: net.IpAddress,
-// io: Io,
-// allocator: std.mem.Allocator,
-// queue: *std.Io.Queue(net.Stream),
-//
-// pub const Callback: type = *const fn (*Context) ServerError!void;
-//
+pub fn static_server(ctx: *Context) ServerError!void {
+    const io = ctx.io;
+    // read from file
+    const cwd: std.Io.Dir = .cwd();
+    defer cwd.close(io);
+
+    //
+    // var stdout_buffer: [1024]u8 = undefined;
+    // var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    // const stdout = &stdout_writer.interface;
+
+    var rbuf: [1024 * 4]u8 = undefined;
+    var index = cwd.openFile(ctx.io, "index.html", .{ .mode = .read_only }) catch return ServerError.Unexpected;
+    defer index.close(io);
+    // create a reader buffer
+    // dump all the content in the body
+    var file_reader = index.reader(io, &rbuf);
+    const freader_inteface = &file_reader.interface;
+
+    // get file lenght to allocate enough bytes
+    const file_length = index.length(io) catch return ServerError.Unexpected;
+
+    // alloc a buffer to return as body
+    const body = ctx.allocator.alloc(u8, file_length) catch return ServerError.Unexpected;
+
+    freader_inteface.readSliceAll(body) catch return ServerError.Unexpected;
+
+    ctx.request.respond(body, .{ .keep_alive = true, .status = .ok }) catch return ServerError.Unexpected;
+}
+
+const ServerError = error{Unexpected};
+
+pub const Callback: type = *const fn (*Context) ServerError!void;
+
+/// For the moment the context is the same as a simple request, add elements to this api if needed
+pub const Context = struct { request: *Request, io: Io, allocator: std.mem.Allocator };
 // pub const Context = struct {
 //     connection: net.Stream,
 //     request: Request,
@@ -174,67 +223,20 @@ fn handler(io: Io, conn: net.Stream, rbuf: []u8, wbuf: []u8) !void {
 //         return .{ .connection = conn, .request = r };
 //     }
 // };
-//
-// pub const Route = struct {
-//     path: []const u8,
-//     method: Method,
-//     handler: Callback,
-//
-//     const Method = enum {
-//         GET,
-//         POST,
-//         UKNOWN,
-//     };
-// };
-//
-// pub const ServerError = error{
-//     ConnectionError,
-//     UnknownError,
-// };
-//
-// pub fn init(io: Io, alloc: std.mem.Allocator, addr: net.IpAddress) !Server {
-//     const buffer = try alloc.alloc(net.Stream, 10);
-//     var queue = Io.Queue(net.Stream).init(buffer);
-//     return .{ .address = addr, .io = io, .routes = &routes_hard_coded, .allocator = alloc, .queue = &queue };
-// }
-//
-// // Let's hard code some routes
-// var routes_hard_coded: [2]Route = .{
-//     .{ .handler = defaultHandler, .method = .GET, .path = "/" },
-//     .{ .handler = badHandler, .method = .GET, .path = "/hello" },
-// };
-//
-// fn defaultHandler(c: *Context) ServerError!void {
-//     c.request.respond("<b>Hello World<b>", .{ .status = .ok }) catch {};
-// }
-//
-// fn badHandler(c: *Context) ServerError!void {
-//     c.request.respond("<b>Hello non world<b>", .{ .status = .bad_request }) catch {};
-// }
-//
-// pub fn listen(self: *Server, io: Io) !void {
-//     var tcp_server = try self.address.listen(io, .{ .reuse_address = true, .protocol = .tcp });
-//     defer tcp_server.deinit(io); // Release resources with the server
-//     defer tcp_server.socket.close(io); // Close the socket
-//
-//     // initialize the queue
-//
-//     log.info("Now listening on port {d}\n", .{self.address.ip4.port});
-//
-//     while (true) {
-//         // accept a connection
-//         const conn = try tcp_server.accept(io);
-//
-//         // // Here we access the reader and writer streaming
-//         // var rbuf: [4 * 1024]u8 = undefined;
-//         // var wbuf: [1024]u8 = undefined;
-//         //
-//         // // We pass the addresses of the buffers to coerce them into slices
-//         // var reader = conn.reader(io, &rbuf);
-//         // var writer = conn.writer(io, &wbuf);
-//         //
-//         // var s = http.Server.init(&reader.interface, &writer.interface);
-//         // try self.queue.put(self.allocator, &s);
-//         try self.queue.putOne(io, conn);
-//     }
-// }
+
+const HTML_STATIC =
+    \\ <html>
+    \\ <head>    
+    \\     <link href="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.0.2/tailwind.min.css" rel="stylesheet">
+    \\     <script src="https://cdn.tailwindcss.com"></script>
+    \\ </head>
+    \\ <title> My Cute Website </title>
+    \\   <body>
+    \\ <div class="bg-blue-500 text-white text-center">
+    \\ <p >Hi Theeeeeeee!!!!!! <3<3<3<3<3<3<3<3</p>
+    \\ <p class="border-purple-200 text-purple-600 hover:border-transparent hover:bg-purple-600 hover:text-white active:bg-purple-700">(^_^*)</p>
+    \\ </div>
+    \\     <p><a href="/">homepage</a></p>
+    \\   </body>
+    \\ </html>
+;
