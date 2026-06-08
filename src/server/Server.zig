@@ -182,17 +182,15 @@ fn handler(io: Io, conn: net.Stream, rbuf: []u8, wbuf: []u8) !void {
 pub fn static_server(ctx: *Context) ServerError!void {
     const io = ctx.io;
     // read from file
-    const cwd: std.Io.Dir = .cwd();
-    defer cwd.close(io);
-
     //
     // var stdout_buffer: [1024]u8 = undefined;
     // var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     // const stdout = &stdout_writer.interface;
 
     var rbuf: [1024 * 4]u8 = undefined;
-    var index = cwd.openFile(ctx.io, "index.html", .{ .mode = .read_only }) catch return ServerError.Unexpected;
+    var index = std.Io.Dir.cwd().openFile(ctx.io, "index.html", .{ .mode = .read_only }) catch return ServerError.Unexpected;
     defer index.close(io);
+    // TODO: the directory handle is not found by the executable?
     // create a reader buffer
     // dump all the content in the body
     var file_reader = index.reader(io, &rbuf);
@@ -203,6 +201,7 @@ pub fn static_server(ctx: *Context) ServerError!void {
 
     // alloc a buffer to return as body
     const body = ctx.allocator.alloc(u8, file_length) catch return ServerError.Unexpected;
+    defer ctx.allocator.free(body);
 
     freader_inteface.readSliceAll(body) catch return ServerError.Unexpected;
 
