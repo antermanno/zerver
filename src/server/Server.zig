@@ -181,14 +181,27 @@ fn handler(io: Io, conn: net.Stream, rbuf: []u8, wbuf: []u8) !void {
 
 pub fn static_server(ctx: *Context) ServerError!void {
     const io = ctx.io;
-    // read from file
-    //
-    // var stdout_buffer: [1024]u8 = undefined;
-    // var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-    // const stdout = &stdout_writer.interface;
 
+    // get the target path
+    var path = ctx.request.head.target;
+    // if the target path is only "/" change path to "index.html"
+    if (std.mem.eql(u8, path, "/")) {
+        path = "static/index.html";
+    } else {
+        path = std.mem.trimStart(u8, path, "/");
+    }
+    log.info("requeste file at {s}\n", .{path});
+
+    // read from file
     var rbuf: [1024 * 4]u8 = undefined;
-    var index = std.Io.Dir.cwd().openFile(ctx.io, "index.html", .{ .mode = .read_only }) catch return ServerError.Unexpected;
+    var index = std.Io.Dir.cwd().openFile(ctx.io, path, .{ .mode = .read_only }) catch |err| switch (err) {
+        Io.File.OpenError.FileNotFound => {
+            four0four(ctx);
+            return;
+        },
+        else => return ServerError.Unexpected,
+    };
+
     defer index.close(io);
     // TODO: the directory handle is not found by the executable?
     // create a reader buffer
@@ -208,6 +221,10 @@ pub fn static_server(ctx: *Context) ServerError!void {
     ctx.request.respond(body, .{ .keep_alive = true, .status = .ok }) catch return ServerError.Unexpected;
 }
 
+fn four0four(ctx: *Context) void {
+    ctx.request.respond(FOUR_0_FOUR, .{ .status = .not_found }) catch {};
+}
+
 const ServerError = error{Unexpected};
 
 pub const Callback: type = *const fn (*Context) ServerError!void;
@@ -222,6 +239,24 @@ pub const Context = struct { request: *Request, io: Io, allocator: std.mem.Alloc
 //         return .{ .connection = conn, .request = r };
 //     }
 // };
+
+const FOUR_0_FOUR =
+    \\  <html>
+    \\  <head>    
+    \\      <link href="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.0.2/tailwind.min.css" rel="stylesheet">
+    \\      <script src="https://cdn.tailwindcss.com"></script>
+    \\  </head>
+    \\  <title> My Cute Website </title>
+    \\    <body>
+    \\  <div class="flex flex-col bg-blue-500 text-white text-center">
+    \\  <p class= "text-xl bg-red-700 hover:bg-purple-900">BAMBOOZLED BUFFOON</p>
+    \\        <p class="border-purple-200 text-purple-600 text-2xl hover:border-transparent hover:bg-purple-600 hover:text-white active:bg-purple-700">404</p>
+    \\      <p><a href="/">homepage</a></p>
+    \\   <img class = "object-center" src="https://i.pinimg.com/originals/e0/d2/f1/e0d2f1e649a8b208273087edaae2b4ea.gif" >
+    \\  </div>
+    \\    </body>
+    \\  </html>
+;
 
 const HTML_STATIC =
     \\ <html>
