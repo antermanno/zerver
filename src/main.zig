@@ -10,7 +10,7 @@ const Server = zerver.Server;
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const arena = init.arena.allocator();
-    const addr: net.IpAddress = .{ .ip4 = .unspecified(8181) };
-    var server: Server = .init(io, arena, addr, .{ .queue_size = 10 });
+    const addr: net.IpAddress = .{ .ip4 = .loopback(8181) };
+    var server: Server = .init(io, arena, addr, .empty, .{ .queue_size = 10 });
     try server.runServer();
 }

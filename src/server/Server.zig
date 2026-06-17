@@ -2,6 +2,7 @@
 const Server = @This();
 
 const std = @import("std");
+const Router = @import("Router.zig");
 const Io = std.Io;
 const net = std.Io.net;
 const AcceptError = net.Server.AcceptError;
@@ -9,21 +10,26 @@ const Request = std.http.Server.Request;
 const log = std.log;
 const http = std.http;
 
+const Route = Router.Route;
+
 // What does a basic server need?
 address: net.IpAddress,
 io: Io,
 allocator: std.mem.Allocator,
 options: ServerOptions,
 /// The queue is nullable because it get's initialized later based on the options
-queue: ?Io.Queue(net.Stream) = null,
+queue: ?Io.Queue(Conn) = null,
+router: Router,
+tcp_server: ?net.Server = null,
 
 /// init function, it takes an io, an allocator, an address and port + server options.
-pub fn init(io: Io, alloc: std.mem.Allocator, addr: net.IpAddress, opt: ServerOptions) Server {
+pub fn init(io: Io, alloc: std.mem.Allocator, addr: net.IpAddress, router: Router, opt: ServerOptions) Server {
     return .{
         .io = io,
         .allocator = alloc,
         .address = addr,
         .options = opt,
+        .router = router,
     };
 }
 
@@ -40,20 +46,46 @@ const ServerOptions = struct {
     };
 };
 
+const Conn = struct {
+    conn: net.Stream,
+    router: ?*Router,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(c: *Conn, io: Io) void {
+        c.conn.close(io);
+    }
+};
+
+pub fn listen(self: *Server, io: Io) !void {
+
+    // Bind and listen in the specified port
+    // Here is where we make use of Server Options
+    self.tcp_server = try self.address.listen(io, .{ .reuse_address = true, .protocol = .tcp });
+    errdefer self.tcp_server.?.socket.close(io); // Close the socket if, god forbid, we get an error with the logging
+
+    log.info("Now listening on http://{d}.{d}.{d}.{d}:{}\n", .{ self.address.ip4.bytes[0], self.address.ip4.bytes[1], self.address.ip4.bytes[2], self.address.ip4.bytes[3], self.address.ip4.port });
+}
+
+pub fn accept(self: *Server, io: Io) !Conn {
+    const conn = try self.tcp_server.?.accept(io);
+
+    // TODO: make the type of allocator depend on server options
+    const gpa: std.mem.Allocator = std.heap.smp_allocator;
+
+    return .{ .conn = conn, .router = &self.router, .allocator = gpa };
+}
+
 /// TODO
-pub fn deinit() void {}
+pub fn deinit(self: *Server, io: Io) void {
+    self.tcp_server.?.deinit(io); // Release resources with the server
+}
 
 /// Blocking call, it start running the server
 pub fn runServer(self: *Server) !void {
-    const addr = self.address;
     const io = self.io;
 
-    // Bind and listen in the specified port
-    var tcp_socket = try addr.listen(self.io, .{ .reuse_address = true, .protocol = .tcp });
-    defer tcp_socket.deinit(self.io); // Release resources with the server
-    // defer tcp_socket.socket.close(self.io); // Close the socket
-
-    log.info("Now listening on http://{d}.{d}.{d}.{d}:{}\n", .{ addr.ip4.bytes[0], addr.ip4.bytes[1], addr.ip4.bytes[2], addr.ip4.bytes[3], addr.ip4.port });
+    // Initialize the server internal tcp_socket
+    try self.listen(io);
 
     // initialize wait group
     var g: Io.Group = .init;
@@ -61,22 +93,22 @@ pub fn runServer(self: *Server) !void {
 
     //Allocate buffer on the heap???
     //let's try just to see how it looks
-    const q_buf = try self.allocator.alloc(net.Stream, self.options.queue_size);
+    const q_buf = try self.allocator.alloc(Conn, self.options.queue_size);
     defer self.allocator.free(q_buf);
 
     self.queue = .init(q_buf);
     var queue = self.queue.?;
 
-    _ = try g.concurrent(io, producer, .{ io, &tcp_socket, &queue });
+    _ = try g.concurrent(io, producer, .{ io, self, &queue });
 
     for (0..self.options.n_workers) |_| {
         _ = try g.concurrent(io, consumer, .{ io, &queue });
     }
-    try g.await(self.io);
+    g.cancel(self.io);
 }
 
 /// Receives connections
-fn producer(io: Io, tcp_server: *net.Server, q: *Io.Queue(net.Stream)) error{Canceled}!void {
+fn producer(io: Io, server: *Server, q: *Io.Queue(Conn)) error{Canceled}!void {
 
     // Accept a connection
     // A server blocks with the accept function,
@@ -84,7 +116,7 @@ fn producer(io: Io, tcp_server: *net.Server, q: *Io.Queue(net.Stream)) error{Can
     // It contains a Socket object (a FILE DESCRIPTOR)
     // and a read-write interface to interact with the socket
     while (true) {
-        var conn = tcp_server.accept(io) catch |err| switch (err) {
+        var conn: Conn = server.accept(io) catch |err| switch (err) {
             net.Server.AcceptError.NetworkDown => {
                 log.err("Network Down", .{});
                 return error.Canceled;
@@ -97,14 +129,14 @@ fn producer(io: Io, tcp_server: *net.Server, q: *Io.Queue(net.Stream)) error{Can
         // if we cannot put the connection to the queue close the connection and stop the loop
         // manage the canceling errors
         q.putOne(io, conn) catch {
-            conn.close(io);
+            conn.deinit(io);
             break;
         };
     }
 }
 
 // each worker assign buffer to be used by the internal handler in its stack
-fn consumer(io: Io, q: *Io.Queue(net.Stream)) error{Canceled}!void {
+fn consumer(io: Io, q: *Io.Queue(Conn)) error{Canceled}!void {
 
     // Reader and Writer buffer to pass to the http handler
     // Maybe make their size an option
@@ -112,27 +144,27 @@ fn consumer(io: Io, q: *Io.Queue(net.Stream)) error{Canceled}!void {
     var wbuf: [4 * 1024]u8 = undefined;
     while (true) {
         // DO something with queue cancelation errors
-        const conn = q.getOne(io) catch continue;
+        var conn = q.getOne(io) catch continue;
         // defer conn.close(io);
 
-        handler(io, conn, &rbuf, &wbuf) catch {
-            conn.close(io);
+        handler(io, &conn, &rbuf, &wbuf) catch {
+            conn.deinit(io);
             continue;
         };
     }
 }
 
-fn handler(io: Io, conn: net.Stream, rbuf: []u8, wbuf: []u8) !void {
+fn handler(io: Io, conn: *Conn, rbuf: []u8, wbuf: []u8) !void {
     // close the connection after handling. The whole server will block when all threads are busy.
     // find a way to make it more "fiber like" and yield a connection
-    defer conn.close(io);
+    defer conn.deinit(io);
     //
     // Make an allocator, maybe make it passable around
-    const gpa: std.mem.Allocator = std.heap.page_allocator;
+    const gpa = conn.allocator;
 
     // We pass the addresses of the buffers to coerce them into slices
-    var reader = conn.reader(io, rbuf);
-    var writer = conn.writer(io, wbuf);
+    var reader = conn.conn.reader(io, rbuf);
+    var writer = conn.conn.writer(io, wbuf);
 
     // Wrapper around the connection (just a reader and a writer)
     // It upgrade the reader to an HTTP READER interface.
@@ -161,7 +193,11 @@ fn handler(io: Io, conn: net.Stream, rbuf: []u8, wbuf: []u8) !void {
 
         var ctx: Context = .{ .allocator = gpa, .io = io, .request = &request };
         // serve a static file
+
         try static_server(&ctx);
+
+        // TODO: make a proper router class
+        // router.handle(&ctx);
 
         // const html_headers = [_]http.Header{
         //     // .{ .name = "Cache-Control", .value = "public, max-age=3600" },
