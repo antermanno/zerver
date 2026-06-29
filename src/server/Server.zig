@@ -3,6 +3,7 @@ const Server = @This();
 
 const std = @import("std");
 const Router = @import("Router.zig");
+const Database = @import("../database/Database.zig");
 const Io = std.Io;
 const net = std.Io.net;
 const AcceptError = net.Server.AcceptError;
@@ -21,15 +22,19 @@ options: ServerOptions,
 queue: ?Io.Queue(Conn) = null,
 router: Router,
 tcp_server: ?net.Server = null,
+database: ?*Database = null,
 
 /// init function, it takes an io, an allocator, an address and port + server options.
 pub fn init(io: Io, alloc: std.mem.Allocator, addr: net.IpAddress, router: Router, opt: ServerOptions) Server {
+    // If a database is passed in the options add it to the server
+    const db = opt.database orelse null;
     return .{
         .io = io,
         .allocator = alloc,
         .address = addr,
         .options = opt,
         .router = router,
+        .database = db,
     };
 }
 
@@ -38,6 +43,7 @@ const ServerOptions = struct {
     is_local: Local = .loopback,
     queue_size: usize = 10,
     n_workers: usize = 10,
+    database: ?*Database = null,
 
     const Local = enum {
         loopback,
