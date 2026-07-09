@@ -32,9 +32,9 @@ pub fn main(init: std.process.Init) !void {
         petals: u8,
         sepal: []const u8,
     };
-    _ = try DB.Table(Bar).init(db);
-    _ = try DB.Table(Trap).init(db);
-    _ = try DB.Table(Flower).init(db);
+    _ = try DB.Table(Bar).init(&db);
+    _ = try DB.Table(Trap).init(&db);
+    _ = try DB.Table(Flower).init(&db);
 
     // Initialize Server
     const addr: net.IpAddress = .{ .ip4 = .loopback(8181) };

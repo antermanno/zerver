@@ -10,9 +10,32 @@ name: []const u8,
 connection: *c.sqlite3,
 // make use of a tagged union
 
+pub fn init(db_name: []const u8) !DB {
+
+    // sqlite3 *db;
+    var db: ?*c.sqlite3 = undefined;
+    var rc: c_int = undefined;
+
+    rc = c.sqlite3_open(@ptrCast(db_name), @ptrCast(&db));
+    // defer _ = c.sqlite3_close(db);
+    if (rc != c.SQLITE_OK) {
+        log.err("Can't open database: {d}\n", .{c.sqlite3_errcode(db)});
+        return error.OpenDatabaseError;
+    }
+
+    return .{
+        .name = db_name,
+        .connection = db.?,
+    };
+}
+
+pub fn deinit(db: *DB) void {
+    _ = c.sqlite3_close(db.connection);
+}
+
 pub fn Table(comptime T: anytype) type {
     return struct {
-
+        const Self = @This();
         // Create the create table query at comptime
         const CREATE_TABLE = create_table: {
 
@@ -52,51 +75,101 @@ pub fn Table(comptime T: anytype) type {
             break :create_table CREATE_TABLE_IF_NOT ++ TABLE_TYPES;
         };
 
-        const Self = @This();
-        pub fn init(db: DB) !Self {
-            var stmt: ?*c.sqlite3_stmt = undefined;
+        // break :insert "INSERT INTO table (column1,column2 ,..) VALUES( value1 value2 );";
+        const INSERT_ELEMENT = insert: {
+            const name = name: {
+                const name_t = @typeName(T);
+                if (std.mem.findScalarLast(u8, name_t, '.')) |idx| {
+                    const name_no_dots = name_t[idx + 1 .. :0];
+                    break :name name_no_dots;
+                }
+                break :name name_t;
+            };
 
-            std.debug.print("{s}\n", .{CREATE_TABLE});
-            var rc = c.sqlite3_prepare_v2(db.connection, CREATE_TABLE, CREATE_TABLE.len, @ptrCast(&stmt), 0);
-            if (rc != c.SQLITE_OK) {
-                const err = c.sqlite3_errmsg(db.connection);
-                const errno = c.sqlite3_errcode(db.connection);
-                log.err("Prepare Error: {s}({d})\n", .{ err, errno });
-                return error.PrepareError;
-            }
-            defer rc = c.sqlite3_finalize(stmt);
+            // get the table name
+            const insert = "INSERT INTO " ++ name;
 
-            rc = c.sqlite3_step(stmt);
-            if (rc == c.SQLITE_DONE) {
-                // log.info("Table in: {any}\n", .{rc});
+            const types_names = blk: {
+                var query: [:0]const u8 = " ( ";
+                const foo_info = @typeInfo(T);
+                for (foo_info.@"struct".fields) |value| {
+                    const name_t = value.name;
+                    query = query ++ std.fmt.comptimePrint("{s} ", .{name_t});
+                }
+                query = query ++ " ) VALUES ( ";
+
+                for (foo_info.@"struct".fields, 0..) |_, i| {
+                    query = query ++ std.fmt.comptimePrint(" ?{d} ", .{i + 1});
+                }
+                break :blk query ++ " )";
+            };
+            // TODO: add the values in a sqlite parameter bind compatible notation
+            break :insert insert ++ types_names;
+        };
+
+        pub fn init(db: *DB) !Self {
+            // Wrapper around sqlite_prepare_statement
+            var stmt: Statement = try .prepareStatement(&db.*, CREATE_TABLE);
+            defer stmt.finalize();
+
+            // Wrapper around sqlite step
+            try stmt.step(db);
+
+            return .{};
+        }
+
+        // pub fn insert(db : DB , item : T)  {
+        //     // INSERT_ELEMENT
+        // }
+
+    };
+}
+
+const Statement = struct {
+    stmt: ?*c.sqlite3_stmt = undefined,
+
+    pub fn prepareStatement(db: *DB, zSQL: [:0]const u8) !Statement {
+        var stmt: ?*c.sqlite3_stmt = undefined;
+
+        const rc = c.sqlite3_prepare_v2(db.connection, zSQL, @intCast(zSQL.len), @ptrCast(&stmt), 0);
+        if (rc != c.SQLITE_OK) {
+            const err = c.sqlite3_errmsg(db.connection);
+            const errno = c.sqlite3_errcode(db.connection);
+            log.err("Prepare Error: {s}({d})\n", .{ err, errno });
+            return error.PrepareError;
+        }
+
+        return .{ .stmt = stmt };
+    }
+
+    pub fn finalize(stmt: *Statement) void {
+        defer _ = c.sqlite3_finalize(stmt.stmt);
+    }
+
+    pub fn step(stmt: *Statement, db: *DB) !void {
+        const rc = c.sqlite3_step(stmt.stmt);
+        switch (rc) {
+            c.SQLITE_DONE => {
                 const err = c.sqlite3_errmsg(db.connection);
                 const errno = c.sqlite3_errcode(db.connection);
                 log.info("Table Created with exit code: {s}({d})\n", .{ err, errno });
-            }
-            return .{};
+            },
+            c.SQLITE_MISUSE => {
+                const err = c.sqlite3_errmsg(db.connection);
+                const errno = c.sqlite3_errcode(db.connection);
+                log.err("Error: {s}({d})\n", .{ err, errno });
+                return error.SqliteMisuse;
+            },
+            c.SQLITE_ROW => {
+                unreachable;
+            },
+            else => return error.UnimplementedError,
         }
-    };
-}
-
-pub fn init(db_name: []const u8) !DB {
-
-    // sqlite3 *db;
-    var db: ?*c.sqlite3 = undefined;
-    var rc: c_int = undefined;
-
-    rc = c.sqlite3_open(@ptrCast(db_name), @ptrCast(&db));
-    // defer _ = c.sqlite3_close(db);
-    if (rc != c.SQLITE_OK) {
-        log.err("Can't open database: {d}\n", .{c.sqlite3_errcode(db)});
-        return error.OpenDatabaseError;
     }
 
-    return .{
-        .name = db_name,
-        .connection = db.?,
-    };
-}
+    pub fn bind(_: *Statement) !void {}
+};
 
-pub fn deinit(db: *DB) void {
-    _ = c.sqlite3_close(db.connection);
-}
+// int (*callback)(void*,int,char**,char**),  /* Callback function */
+//   void *,                                    /* 1st argument to callback */
+// pub fn exec(db: *DB, sql_statement : [:0]const u8, callback : *const fn callback() ())  {}
