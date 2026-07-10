@@ -39,6 +39,8 @@ pub fn deinit(db: *DB) void {
 /// Creates a Table in the datbase with entries corresponding to the fields of struct.
 pub fn Table(comptime T: anytype) type {
     return struct {
+        db: *DB,
+
         const Self = @This();
         // Create the create table query at comptime
         const CREATE_TABLE = create_table: {
@@ -94,44 +96,75 @@ pub fn Table(comptime T: anytype) type {
             };
 
             // get the table name
-            const insert = "INSERT INTO " ++ name;
+            const insert_into = "INSERT INTO " ++ name;
 
             const types_names = blk: {
                 var query: [:0]const u8 = " ( ";
                 const foo_info = @typeInfo(T);
-                for (foo_info.@"struct".fields) |value| {
+                const fields = foo_info.@"struct".fields;
+                for (fields, 0..) |value, i| {
                     const name_t = value.name;
-                    query = query ++ std.fmt.comptimePrint("{s} ", .{name_t});
+                    if (i == fields.len - 1) {
+                        query = query ++ std.fmt.comptimePrint("{s} ", .{name_t});
+                    } else {
+                        query = query ++ std.fmt.comptimePrint("{s}, ", .{name_t});
+                    }
                 }
                 query = query ++ " ) VALUES ( ";
 
-                for (foo_info.@"struct".fields, 0..) |_, i| {
-                    query = query ++ std.fmt.comptimePrint(" ?{d} ,", .{i + 1});
+                for (0..fields.len) |i| {
+                    if (i == fields.len - 1) {
+                        query = query ++ std.fmt.comptimePrint(" ? ", .{});
+                    } else {
+                        query = query ++ std.fmt.comptimePrint(" ?, ", .{});
+                    }
                 }
                 break :blk query ++ " )";
             };
             // TODO: add the values in a sqlite parameter bind compatible notation
-            break :insert insert ++ types_names;
+            break :insert insert_into ++ types_names;
         };
 
         /// Initialize the table and creates it into the database if it doesn't exist.
         pub fn init(db: *DB) !Self {
             // Wrapper around sqlite_prepare_statement
             std.debug.print("{s}\n", .{CREATE_TABLE});
-            std.debug.print("{s}\n", .{INSERT_ELEMENT});
             var stmt: Statement = try .init(db, CREATE_TABLE);
             defer stmt.deinit();
 
             // Wrapper around sqlite step
             _ = try stmt.step(db);
 
-            return .{};
+            return .{
+                .db = db,
+            };
         }
 
-        // pub fn insert(db : DB , item : T)  {
-        //     // INSERT_ELEMENT
-        // }
+        pub fn insert(tbl: *Self, element: T) !void {
+            std.debug.print("{s}\n", .{INSERT_ELEMENT});
+            var stmt: Statement = try .init(
+                tbl.db,
+                INSERT_ELEMENT,
+            );
 
+            const struct_info = @typeInfo(T);
+            inline for (struct_info.@"struct".fields, 0..) |value, i| {
+                const field_info = @typeInfo(value.type);
+                const field_name = value.name;
+                switch (field_info) {
+                    .int => {
+                        const field_val = @field(element, field_name);
+                        _ = c.sqlite3_bind_int(stmt.stmt, @intCast(i + 1), @intCast(field_val));
+                    },
+                    .pointer => {
+                        const field_val = @field(element, field_name);
+                        _ = c.sqlite3_bind_text(stmt.stmt, @intCast(i + 1), @ptrCast(field_val), @intCast(field_val.len), null);
+                    },
+                    else => {},
+                }
+            }
+            _ = try stmt.step(tbl.db);
+        }
     };
 }
 
@@ -180,10 +213,6 @@ const Statement = struct {
             else => return error.UnimplementedError,
         }
     }
-
-    // pub fn bind(stmt: *Statement, idx : usize) !void {
-    //
-    // }
 };
 
 pub fn logDatabase(db: DB, comptime log_msg: []const u8) void {

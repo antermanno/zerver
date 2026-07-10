@@ -33,8 +33,24 @@ pub fn main(init: std.process.Init) !void {
         sepal: []const u8,
     };
     _ = try DB.Table(Bar).init(&db);
-    _ = try DB.Table(Trap).init(&db);
-    _ = try DB.Table(Flower).init(&db);
+    var trap: DB.Table(Trap) = try .init(&db);
+    var flower: DB.Table(Flower) = try .init(&db);
+
+    try trap.insert(.{
+        .name = "Stanberg",
+        .crime = -1,
+    });
+
+    const flowers = &[_]Flower{
+        .{ .petals = 3, .sepal = "nice sepal" },
+        .{ .petals = 4, .sepal = "not nice sepal" },
+        .{ .petals = 6, .sepal = "test" },
+        .{ .petals = 7, .sepal = "mysterious" },
+        .{ .petals = 3, .sepal = "candle" },
+    };
+    for (flowers) |f| {
+        try flower.insert(f);
+    }
 
     // Initialize Server
     const addr: net.IpAddress = .{ .ip4 = .loopback(8181) };
