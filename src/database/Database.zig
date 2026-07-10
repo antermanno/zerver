@@ -4,12 +4,14 @@ const log = std.log;
 
 // pub fn Database(comptime T: anytype) !type {
 //     return struct {
+/// Database structure. Wrapper around sqlite3 db connection type.
 const DB = @This();
 
 name: []const u8,
 connection: *c.sqlite3,
 // make use of a tagged union
 
+/// Creates a connection to the database with name db_name.
 pub fn init(db_name: []const u8) !DB {
 
     // sqlite3 *db;
@@ -29,10 +31,12 @@ pub fn init(db_name: []const u8) !DB {
     };
 }
 
+/// Closes the connection to the database.
 pub fn deinit(db: *DB) void {
     _ = c.sqlite3_close(db.connection);
 }
 
+/// Creates a Table in the datbase with entries corresponding to the fields of struct.
 pub fn Table(comptime T: anytype) type {
     return struct {
         const Self = @This();
@@ -40,15 +44,18 @@ pub fn Table(comptime T: anytype) type {
         const CREATE_TABLE = create_table: {
 
             // Name the table the same as the structure
+            //
+
             const CREATE_TABLE_IF_NOT = blk: {
-                var name = @typeName(T);
-                if (std.mem.findScalarLast(u8, name, '.')) |idx| {
-                    const name_no_dots = name[idx + 1 .. :0];
-                    const query = "CREATE TABLE IF NOT EXISTS " ++ name_no_dots;
-                    break :blk query;
-                }
-                const query = "CREATE TABLE IF NOT EXISTS " ++ name;
-                break :blk query;
+                const name = name: {
+                    const name_t = @typeName(T);
+                    if (std.mem.findScalarLast(u8, name_t, '.')) |idx| {
+                        const name_no_dots = name_t[idx + 1 .. :0];
+                        break :name name_no_dots;
+                    }
+                    break :name name_t;
+                };
+                break :blk "CREATE TABLE IF NOT EXISTS " ++ name;
             };
 
             // mapping zig types to sqltypes
@@ -61,15 +68,15 @@ pub fn Table(comptime T: anytype) type {
 
                     switch (info) {
                         .int => {
-                            query = query ++ std.fmt.comptimePrint("{s} INTEGER ", .{name});
+                            query = query ++ std.fmt.comptimePrint("{s} INTEGER, ", .{name});
                         },
                         .pointer => {
-                            query = query ++ std.fmt.comptimePrint("{s} VARCHAR ", .{name});
+                            query = query ++ std.fmt.comptimePrint("{s} TEXT, ", .{name});
                         },
                         else => {},
                     }
                 }
-                break :blk query ++ "id PRIMARY KEY )";
+                break :blk query ++ "id INTEGER PRIMARY KEY )";
             };
 
             break :create_table CREATE_TABLE_IF_NOT ++ TABLE_TYPES;
@@ -99,7 +106,7 @@ pub fn Table(comptime T: anytype) type {
                 query = query ++ " ) VALUES ( ";
 
                 for (foo_info.@"struct".fields, 0..) |_, i| {
-                    query = query ++ std.fmt.comptimePrint(" ?{d} ", .{i + 1});
+                    query = query ++ std.fmt.comptimePrint(" ?{d} ,", .{i + 1});
                 }
                 break :blk query ++ " )";
             };
@@ -107,13 +114,16 @@ pub fn Table(comptime T: anytype) type {
             break :insert insert ++ types_names;
         };
 
+        /// Initialize the table and creates it into the database if it doesn't exist.
         pub fn init(db: *DB) !Self {
             // Wrapper around sqlite_prepare_statement
-            var stmt: Statement = try .prepareStatement(&db.*, CREATE_TABLE);
-            defer stmt.finalize();
+            std.debug.print("{s}\n", .{CREATE_TABLE});
+            std.debug.print("{s}\n", .{INSERT_ELEMENT});
+            var stmt: Statement = try .init(db, CREATE_TABLE);
+            defer stmt.deinit();
 
             // Wrapper around sqlite step
-            try stmt.step(db);
+            _ = try stmt.step(db);
 
             return .{};
         }
@@ -125,50 +135,62 @@ pub fn Table(comptime T: anytype) type {
     };
 }
 
+/// Wrapper around sqlite statements
 const Statement = struct {
     stmt: ?*c.sqlite3_stmt = undefined,
 
-    pub fn prepareStatement(db: *DB, zSQL: [:0]const u8) !Statement {
+    /// Returns a sqlite statement
+    pub fn init(db: *DB, zSQL: [:0]const u8) !Statement {
         var stmt: ?*c.sqlite3_stmt = undefined;
 
         const rc = c.sqlite3_prepare_v2(db.connection, zSQL, @intCast(zSQL.len), @ptrCast(&stmt), 0);
         if (rc != c.SQLITE_OK) {
-            const err = c.sqlite3_errmsg(db.connection);
-            const errno = c.sqlite3_errcode(db.connection);
-            log.err("Prepare Error: {s}({d})\n", .{ err, errno });
+            db.logDatabase("Prepare Error: ");
             return error.PrepareError;
         }
 
         return .{ .stmt = stmt };
     }
 
-    pub fn finalize(stmt: *Statement) void {
+    /// deallocates an sqlite statement
+    pub fn deinit(stmt: *Statement) void {
         defer _ = c.sqlite3_finalize(stmt.stmt);
     }
 
-    pub fn step(stmt: *Statement, db: *DB) !void {
+    const StepStatus = enum(u64) {
+        default,
+        done = c.SQLITE_DONE,
+        row = c.SQLITE_ROW,
+    };
+
+    /// wrapper around sqlite3_step
+    pub fn step(stmt: *Statement, db: *DB) !StepStatus {
         const rc = c.sqlite3_step(stmt.stmt);
         switch (rc) {
             c.SQLITE_DONE => {
-                const err = c.sqlite3_errmsg(db.connection);
-                const errno = c.sqlite3_errcode(db.connection);
-                log.info("Table Created with exit code: {s}({d})\n", .{ err, errno });
+                db.logDatabase("Table created with exist code");
+                return .done;
             },
             c.SQLITE_MISUSE => {
-                const err = c.sqlite3_errmsg(db.connection);
-                const errno = c.sqlite3_errcode(db.connection);
-                log.err("Error: {s}({d})\n", .{ err, errno });
                 return error.SqliteMisuse;
             },
             c.SQLITE_ROW => {
-                unreachable;
+                return .row;
             },
             else => return error.UnimplementedError,
         }
     }
 
-    pub fn bind(_: *Statement) !void {}
+    // pub fn bind(stmt: *Statement, idx : usize) !void {
+    //
+    // }
 };
+
+pub fn logDatabase(db: DB, comptime log_msg: []const u8) void {
+    const err = c.sqlite3_errmsg(db.connection);
+    const errno = c.sqlite3_errcode(db.connection);
+    log.info("{s}\nErrMsg:{s}({d})\n", .{ log_msg, err, errno });
+}
 
 // int (*callback)(void*,int,char**,char**),  /* Callback function */
 //   void *,                                    /* 1st argument to callback */
