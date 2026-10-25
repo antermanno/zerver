@@ -1,33 +1,37 @@
 const std = @import("std");
 const buildSQL = @import("build_sqlite.zig").buildLibSqlite;
+const Translator = @import("translate_c").Translator;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const translate_c = b.addTranslateC(.{
-        .root_source_file = b.path("src-c/sqlite3.h"),
+    const translate_c = b.dependency("translate_c", .{});
+
+    const t: Translator = .init(translate_c, .{
+        .c_source_file = b.path("src-c/sqlite3.h"),
         .target = target,
         .optimize = optimize,
     });
+    //
+    // const translate_c = b.addTranslateC(.{
+    //     .root_source_file = b.path("src-c/sqlite3.h"),
+    //     .target = target,
+    //     .optimize = optimize,
+    // });
 
     const zql = b.addModule("zql", .{
         .root_source_file = b.path("src/database/Database.zig"),
         .target = target,
-        .imports = &.{
-            .{ .name = "c", .module = translate_c.createModule() },
-        },
     });
+    zql.addImport("c", t.mod);
 
-    const mod = b.addModule("zerver", .{
+    const zerver = b.addModule("zerver", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
-
-        .imports = &.{
-            .{ .name = "zql", .module = zql },
-            .{ .name = "c", .module = translate_c.createModule() },
-        },
     });
+    zerver.addImport("zql", zql);
+    zerver.addImport("c", t.mod);
 
     const sqlite_lib = buildSQL(b, target, optimize);
 
@@ -39,13 +43,10 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{
-                .{ .name = "zerver", .module = mod },
-            },
         }),
     });
+    exe.root_module.addImport("zerver", zerver);
     exe.root_module.linkLibrary(sqlite_lib);
-
     b.installArtifact(exe);
 
     const run_step = b.step("run", "Run the app");

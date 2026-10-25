@@ -1,6 +1,7 @@
 const c = @import("c");
 const std = @import("std");
 const log = std.log;
+const Type = std.lang.Type;
 
 // pub fn Database(comptime T: anytype) !type {
 //     return struct {
@@ -64,9 +65,8 @@ pub fn Table(comptime T: anytype) type {
             const TABLE_TYPES = blk: {
                 var query: [:0]const u8 = "(";
                 const foo_info = @typeInfo(T);
-                for (foo_info.@"struct".fields) |value| {
-                    const name = value.name;
-                    const info = @typeInfo(value.type);
+                for (foo_info.@"struct".field_names, foo_info.@"struct".field_types) |name, f_type| {
+                    const info = @typeInfo(f_type);
 
                     switch (info) {
                         .int => {
@@ -101,13 +101,12 @@ pub fn Table(comptime T: anytype) type {
             const types_names = blk: {
                 var query: [:0]const u8 = " ( ";
                 const foo_info = @typeInfo(T);
-                const fields = foo_info.@"struct".fields;
-                for (fields, 0..) |value, i| {
-                    const name_t = value.name;
+                const fields = foo_info.@"struct".field_names;
+                for (fields, 0..) |field_name, i| {
                     if (i == fields.len - 1) {
-                        query = query ++ std.fmt.comptimePrint("{s} ", .{name_t});
+                        query = query ++ std.fmt.comptimePrint("{s} ", .{field_name});
                     } else {
-                        query = query ++ std.fmt.comptimePrint("{s}, ", .{name_t});
+                        query = query ++ std.fmt.comptimePrint("{s}, ", .{field_name});
                     }
                 }
                 query = query ++ " ) VALUES ( ";
@@ -140,6 +139,38 @@ pub fn Table(comptime T: anytype) type {
             };
         }
 
+        const Callback = *const fn () void;
+
+        // pub fn exec(tbl: *Self, zSQL: [:0]const u8, callback: ?Callback, out: [][]u8) void {}
+        //
+        // const RETRIEVE_ID = "SELECT * FROM Flower where id == ?";
+        // fn retieveOneById(tbl: *Self, id: usize) !Result {
+        //     const stmt: Statement = try .init(tbl.db, RETRIEVE_ID);
+        //     _ = c.sqlite3_bind_int(stmt.stmt, id, @intCast(id));
+        //     _ = try stmt.step(tbl.db);
+        //     const n_cols = c.sqlite3_column_count(stmt.stmt);
+        //     const out: T = undefined;
+        //     const info_ty = @typeInfo(T);
+        //     const fields = info_ty.@"struct".fields;
+        //     for (fields, 0..) |field, i| {
+        //         switch (field.type) {
+        //             .int => {
+        //                 const field_val = @field(element, field_name);
+        //                 const c.sqlite3_column_int(stmt.stmt, i);
+        //             },
+        //             .pointer => {
+        //                 const field_val = @field(element, field_name);
+        //                 _ = c.sqlite3_bind_text(stmt.stmt, @intCast(i + 1), @ptrCast(field_val), @intCast(field_val.len), null);
+        //             },
+        //     }
+        //     return error.Unimplemented;
+        // }
+
+        const Result = struct {
+            id: usize,
+            data: T,
+        };
+
         pub fn insert(tbl: *Self, element: T) !void {
             std.debug.print("{s}\n", .{INSERT_ELEMENT});
             var stmt: Statement = try .init(
@@ -148,10 +179,10 @@ pub fn Table(comptime T: anytype) type {
             );
 
             const struct_info = @typeInfo(T);
-            inline for (struct_info.@"struct".fields, 0..) |value, i| {
-                const field_info = @typeInfo(value.type);
-                const field_name = value.name;
-                switch (field_info) {
+            const names = struct_info.@"struct".field_names;
+            const types = struct_info.@"struct".field_types;
+            inline for (names, types, 0..) |field_name, field_type, i| {
+                switch (@typeInfo(field_type)) {
                     .int => {
                         const field_val = @field(element, field_name);
                         _ = c.sqlite3_bind_int(stmt.stmt, @intCast(i + 1), @intCast(field_val));
@@ -201,7 +232,7 @@ const Statement = struct {
         const rc = c.sqlite3_step(stmt.stmt);
         switch (rc) {
             c.SQLITE_DONE => {
-                db.logDatabase("Table created with exist code");
+                db.logDatabase("Step Executed successfully");
                 return .done;
             },
             c.SQLITE_MISUSE => {

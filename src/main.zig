@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const net = Io.net;
 const http = std.http;
@@ -9,6 +10,8 @@ const Server = zerver.Server;
 const DB = zerver.DB;
 
 pub fn main(init: std.process.Init) !void {
+    std.debug.print("Arch is {any}\n", .{builtin.target});
+
     const io = init.io;
     const arena = init.arena.allocator();
 
