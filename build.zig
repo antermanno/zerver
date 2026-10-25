@@ -37,6 +37,12 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(sqlite_lib);
 
+    // Powerful asyncio runtime
+    const zio = b.dependency("zio", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     const exe = b.addExecutable(.{
         .name = "zerver",
         .root_module = b.createModule(.{
@@ -47,6 +53,7 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addImport("zerver", zerver);
     exe.root_module.linkLibrary(sqlite_lib);
+    exe.root_module.addImport("zio", zio.module("zio"));
     b.installArtifact(exe);
 
     const run_step = b.step("run", "Run the app");
